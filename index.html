@@ -1242,12 +1242,12 @@ document.getElementById('isin-input').addEventListener('keydown', e => {
    Beispiel: 'https://six-proxy.dein-name.workers.dev'
    Leer lassen wenn via Claude.ai genutzt (kein Proxy nötig)
 ───────────────────────────────────────────────────────────── */
-const PROXY_URL = 'https://six-proxy.kracrde.workers.dev/';
+const PROXY_URL = '';
 
 async function callClaude(prompt, useSearch = true) {
   const body = {
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 8000,
+    max_tokens: 4000,
     messages: [{ role: 'user', content: prompt }]
   };
   if (useSearch) body.tools = [{ type: 'web_search_20250305', name: 'web_search' }];
@@ -1269,6 +1269,12 @@ async function callClaude(prompt, useSearch = true) {
   let r;
   try {
     r = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+    // Retry once on 429 after a delay
+    if (r.status === 429) {
+      setLoadingStep('Rate Limit erreicht — warte 20 Sekunden und versuche es erneut…');
+      await new Promise(res => setTimeout(res, 20000));
+      r = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+    }
   } catch (netErr) {
     if (!PROXY_URL) {
       throw new Error(
@@ -1284,6 +1290,7 @@ async function callClaude(prompt, useSearch = true) {
     const errText = await r.text().catch(() => '');
     if (r.status === 401) throw new Error('API-Key ungültig oder fehlt — Key prüfen.');
     if (r.status === 403) throw new Error('Zugriff verweigert (403) — Key prüfen.');
+    if (r.status === 429) throw new Error('Rate Limit (429) — bitte 1 Minute warten und nochmals versuchen. Bei neuem Konto: console.anthropic.com → Organization → Tier erhöhen.');
     if (r.status === 529) throw new Error('API überlastet — kurz warten und nochmals versuchen.');
     throw new Error(`API Fehler ${r.status}: ${errText.slice(0, 200)}`);
   }
@@ -1415,7 +1422,7 @@ Antworte NUR mit diesem JSON-Objekt (keine Markdown-Blocks, kein anderer Text):
    STEP 3 — FULL AI REPORT DATA
 ═══════════════════════════════════════════════════════════════ */
 async function fetchReportData(isin, ticker, name, priceData) {
-  setLoadingStep(`Schritt 2/3 — Kursdaten geladen<br><span class="active">Schritt 3/3 — KI erstellt vollständige Analyse inkl. Handelssignale für ${name}…</span><br><span style="color:var(--muted);font-size:9px;">(Dieser Schritt dauert ~20–30 Sekunden)</span>`);
+  setLoadingStep(`Schritt 2/3 — Kursdaten geladen<br><span class="active">Schritt 3/3 — KI erstellt Analyse für ${name}…</span><br><span style="color:var(--muted);font-size:9px;">(Kann 30–60 Sek. dauern bei neuem Konto / Tier 1)</span>`);
 
   const priceCtx = priceData
     ? `Aktueller Kurs: ${priceData.price.toFixed(2)} ${priceData.currency}, 52W High: ${priceData.high52?.toFixed(2)}, 52W Low: ${priceData.low52?.toFixed(2)}, Mkt Cap: ${priceData.mktCap ? (priceData.mktCap/1e9).toFixed(1)+'B '+priceData.currency : 'unbekannt'}`
@@ -1659,7 +1666,29 @@ Folgendes SCHEMA zeigt die Struktur. Ersetze alle Platzhalterwerte durch echte D
   }
 }`;
 
-  return callClaude(prompt, true);
+  // Split into 2 smaller calls to respect Tier 1 rate limits (30k tokens/min)
+  // Call A: scores, cards, KPIs
+  const shortPromptA = `Du bist Finanzanalyst. Analysiere ${name} (ISIN: ${isin}, Ticker: ${ticker}). ${priceCtx}
+Heute: ${new Date().toLocaleDateString('de-CH')}.
+Gib NUR dieses JSON aus (kein Markdown, kein anderer Text):
+{"risk_score":0,"risk_label":"","risk_desc":"","kpis":[{"label":"","value":"","sub":""}],"chart_events":[{"label":"","month_offset":0,"type":"pos"}],"valuation_cards":[{"type":"green","badge":"BEAT","metric":"","value":"","note":""}],"health_cards":[{"type":"green","badge":"BEAT","metric":"","value":"","note":""}],"growth_cards":[{"type":"green","badge":"BEAT","metric":"","value":"","note":""}],"score_valuation":{"sub_score":0,"max":35,"items":[{"label":"","score":0,"color":"green"}]},"score_health":{"sub_score":0,"max":35,"items":[{"label":"","score":0,"color":"green"}]},"score_growth":{"sub_score":0,"max":30,"items":[{"label":"","score":0,"color":"green"}]},"total_score":0,"total_label":""}
+Ersetze alle Nullen und leeren Strings durch echte aktuelle Daten. Genau 8 KPIs, je 6 Cards, je 4 Score-Items.`;
+
+  setLoadingStep(`Schritt 3a — Risiko & Bewertung fuer ${name}...`);
+  const resultA = await callClaude(shortPromptA, true);
+  await new Promise(res => setTimeout(res, 5000));
+
+  // Call B: quarterly, trading signals, verdict
+  const shortPromptB = `Du bist Finanzanalyst. Analysiere ${name} (ISIN: ${isin}). ${priceCtx}
+Heute: ${new Date().toLocaleDateString('de-CH')}.
+Gib NUR dieses JSON aus (kein Markdown, kein anderer Text):
+{"quarterly_headers":["Quartal","Umsatz","Nettogewinn","EPS","Marge","vs. Schaetzung"],"quarterly_rows":[{"q":"Q4 2024","cols":["","","","","BEAT"]}],"earnings_summary":"","earnings_kpis":[{"label":"","value":"","delta":""}],"catalysts":[{"title":"","detail":""}],"risks":[{"title":"","detail":""}],"rating":"HOLD","rating_score_pct":50,"verdict_sub":"","verdict_text":"","verdict_kpis":[{"label":"","value":"","color":"amber"}],"trading":{"signal":"HALTEN","signal_sub":"","current_price":0,"currency":"CHF","signal_kpis":[{"label":"","value":"","delta":""}],"entry_zones":[{"price_center":0,"price_low":0,"price_high":0,"label":"Kaufzone","strength":3,"color":"buy","reason":"","basis":""}],"exit_zones":[{"price_center":0,"price_low":0,"price_high":0,"label":"Verkaufszone","strength":3,"color":"sell","reason":"","basis":""}],"stop_loss_recommended":0,"stop_loss_reason":"","price_target_base":0,"price_target_bull":0,"price_target_bear":0,"scenarios":[{"type":"bull","name":"Bull Case","probability":30,"target":0,"upside_pct":15,"horizon":"12 Monate","description":"","triggers":[""]},{"type":"base","name":"Base Case","probability":50,"target":0,"upside_pct":5,"horizon":"12 Monate","description":"","triggers":[""]},{"type":"bear","name":"Bear Case","probability":20,"target":0,"upside_pct":-15,"horizon":"12 Monate","description":"","triggers":[""]}],"tech_levels":[{"level":"52W-Hoch","price":0,"type":"resistance","note":""}]}}
+Ersetze alle Nullen/leeren Strings durch echte Daten. 7 Quartale, 4 earnings_kpis, 5 catalysts, 5 risks, 5 verdict_kpis, 4 signal_kpis, 3 entry_zones, 2 exit_zones, 8 tech_levels.`;
+
+  setLoadingStep(`Schritt 3b — Handelssignale & Fazit fuer ${name}...`);
+  const resultB = await callClaude(shortPromptB, true);
+
+  return { ...resultA, ...resultB };
 }
 
 /* ═══════════════════════════════════════════════════════════════
